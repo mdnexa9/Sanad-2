@@ -1,0 +1,199 @@
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const { TwaGenerator, TwaManifest } = require("@bubblewrap/core");
+
+class SilentPrompt {
+  printMessage() {}
+  printWarning() {}
+  printError() {}
+  async promptInput(_message, defaultValue = "") {
+    return defaultValue;
+  }
+  async promptConfirm(_message, defaultValue = true) {
+    return defaultValue;
+  }
+  async promptChoice(_message, choices = [], defaultValue) {
+    if (typeof defaultValue === "number") return defaultValue;
+    if (typeof defaultValue === "string") return defaultValue;
+    return Array.isArray(choices) ? choices[0] : 0;
+  }
+  async promptPassword() {
+    return "";
+  }
+}
+
+const manifest = await TwaManifest.fromFile("twa-manifest.json");
+const generator = new TwaGenerator();
+await generator.createTwaProject(process.cwd(), manifest, new SilentPrompt());
+console.log("TWA project generated");
+{
+  "packageId": "app.nexa.sanad",
+  "host": "md-nexa-sanad.vercel.app",
+  "name": "سند",
+  "launcherName": "سند",
+  "display": "standalone",
+  "themeColor": "#0C0C0B",
+  "themeColorDark": "#0C0C0B",
+  "navigationColor": "#0C0C0B",
+  "navigationColorDark": "#0C0C0B",
+  "navigationDividerColor": "#0C0C0B",
+  "navigationDividerColorDark": "#0C0C0B",
+  "backgroundColor": "#0C0C0B",
+  "enableNotifications": false,
+  "startUrl": "/",
+  "iconUrl": "https://md-nexa-sanad.vercel.app/icon-512.png",
+  "maskableIconUrl": "https://md-nexa-sanad.vercel.app/app-icon-1024.png",
+  "splashScreenFadeOutDuration": 300,
+  "signingKey": {
+    "path": "./android.keystore",
+    "alias": "upload"
+  },
+  "appVersionName": "1",
+  "appVersionCode": 1,
+  "shortcuts": [],
+  "generatorApp": "bubblewrap-cli",
+  "webManifestUrl": "https://md-nexa-sanad.vercel.app/__grok/manifest.webmanifest",
+  "fallbackType": "customtabs",
+  "features": {},
+  "alphaDependencies": {
+    "enabled": false
+  },
+  "enableSiteSettingsShortcut": false,
+  "isChromeOSOnly": false,
+  "isMetaQuest": false,
+  "fullScopeUsed": true,
+  "minSdkVersion": 24,
+  "orientation": "portrait",
+  "fingerprints": [],
+  "additionalTrustedOrigins": [],
+  "retainedBundles": []
+}
+# Builds a Trusted Web Activity (no browser chrome, no ads) wrapping
+# https://md-nexa-sanad.vercel.app
+#
+# Optional secrets (Settings → Secrets and variables → Actions):
+#   ANDROID_KEYSTORE_BASE64
+#   ANDROID_KEYSTORE_PASSWORD
+#   ANDROID_KEY_PASSWORD
+# If missing, a temporary CI key is generated (fine for testing, not for Play).
+
+name: Build Android APK & AAB
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        run: |
+          set +o pipefail
+          mkdir -p "$ANDROID_SDK_ROOT/licenses"
+          printf '24333f8a63b6825ea9c5514f83c2829b004d1dc0\n' > "$ANDROID_SDK_ROOT/licenses/android-sdk-license"
+          printf '84831b9409646161cecb6b7f2a7b00deccc9e54\n' > "$ANDROID_SDK_ROOT/licenses/android-sdk-preview-license"
+          yes 2>/dev/null | sdkmanager --licenses >/dev/null || true
+
+      - name: Configure Bubblewrap
+        run: |
+          mkdir -p "$HOME/.bubblewrap"
+          python3 - <<'PY'
+          import json, os
+          jdk = os.environ.get("JAVA_HOME", "")
+          sdk = os.environ.get("ANDROID_SDK_ROOT") or os.environ.get("ANDROID_HOME", "")
+          open(os.path.expanduser("~/.bubblewrap/config.json"), "w").write(
+              json.dumps({"jdkPath": jdk, "androidSdkPath": sdk})
+          )
+          print("jdk", jdk)
+          print("sdk", sdk)
+          PY
+
+      - name: Prepare signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          STORE_PASS="${ANDROID_KEYSTORE_PASSWORD:-sanad-temp-ci}"
+          KEY_PASS="${ANDROID_KEY_PASSWORD:-sanad-temp-ci}"
+          echo "STORE_PASS=$STORE_PASS" >> "$GITHUB_ENV"
+          echo "KEY_PASS=$KEY_PASS" >> "$GITHUB_ENV"
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android.keystore
+          else
+            keytool -genkeypair -keystore android.keystore -alias upload \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$STORE_PASS" -keypass "$KEY_PASS" \
+              -dname "CN=Sanad, OU=Nexa, O=Nexa, L=Riyadh, ST=Riyadh, C=SA" \
+              -noprompt
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret. Using a temporary key (not for Play Store)."
+          fi
+          keytool -list -v -keystore android.keystore -storepass "$STORE_PASS" | tee fingerprint.txt
+
+      - name: Install Bubblewrap
+        run: |
+          npm install --global @bubblewrap/cli
+          npm install @bubblewrap/core
+
+      - name: Bump version
+        run: |
+          python3 - <<'PY'
+          import json, os
+          path = "twa-manifest.json"
+          data = json.load(open(path, encoding="utf-8"))
+          code = int(os.environ["GITHUB_RUN_NUMBER"])
+          data["appVersionCode"] = code
+          data["appVersionName"] = f"1.{code}"
+          json.dump(data, open(path, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+          print("version", data["appVersionName"], data["appVersionCode"])
+          PY
+
+      - name: Generate TWA project
+        run: node scripts/generate-twa.mjs
+
+      - name: Build APK and AAB
+        env:
+          BUBBLEWRAP_KEYSTORE_PASSWORD: ${{ env.STORE_PASS }}
+          BUBBLEWRAP_KEY_PASSWORD: ${{ env.KEY_PASS }}
+        run: |
+          bubblewrap build --skipPwaValidation \
+            --signingKeyPath "$GITHUB_WORKSPACE/android.keystore" \
+            --signingKeyAlias upload
+
+      - name: Collect outputs
+        run: |
+          mkdir -p dist
+          find . -name "app-release-signed.apk" -exec cp -f {} dist/sanad.apk \;
+          find . -name "app-release-bundle.aab" -exec cp -f {} dist/sanad.aab \;
+          ls -la dist
+          test -s dist/sanad.apk
+          test -s dist/sanad.aab
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sanad-android
+          if-no-files-found: error
+          path: |
+            dist/sanad.apk
+            dist/sanad.aab
+            fingerprint.txt
